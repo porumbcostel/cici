@@ -1,0 +1,97 @@
+name: eumas
+
+on:
+  schedule:
+    - cron: "*/9 * * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    env:
+      PY_COLORS: "1"
+    
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set system locale
+        run: |
+          echo "Setting up locale..."
+          sudo apt-get install tzdata locales -y
+          sudo locale-gen en_US.UTF-8
+          sudo localectl set-locale LANG="en_US.UTF-8"
+          export LANG="en_US.UTF-8"
+          sudo update-locale
+          echo "Locale configuration:"
+          locale -a
+          locale
+          locale -c -k LC_NUMERIC
+          localectl status
+        shell: bash
+
+      - name: Install Brave browser
+        run: |
+          echo "Installing Brave browser..."
+          sudo apt-get -y update
+          sudo apt-get install -y curl gnupg
+          curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list
+          sudo apt-get update && sudo apt-get install -y brave-browser
+          brave --version
+        shell: bash
+
+      - name: Install Cloudflare WARP
+        run: |
+          echo "Setting up Cloudflare WARP..."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+          sleep 5
+        shell: bash
+
+      - name: Verify WARP connection
+        run: |
+          echo "Checking WARP connection..."
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep "warp=on" || echo "WARP verification output:"
+          curl -s https://www.cloudflare.com/cdn-cgi/trace
+        shell: bash
+
+      - name: Install Python dependencies
+        run: |
+          echo "Installing Python dependencies..."
+          python -m pip install --upgrade pip
+          pip install --upgrade wheel
+          pip install --upgrade seleniumbase
+          pip install --upgrade pyautogui
+          pip install --upgrade pymongo
+          pip install --upgrade python-xlib
+        shell: bash
+
+      - name: Install chromedriver
+        run: |
+          echo "Installing chromedriver..."
+          seleniumbase install chromedriver
+
+      - name: Run automation script
+        run: |
+          echo "Starting automation..."
+          python automa.py --brave --incognito --do-not-track --xvfb --screenshot
+        shell: bash
