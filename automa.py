@@ -1,113 +1,245 @@
-"""
-SeleniumBase automation script with proxy rotation and browser configuration.
-"""
 
+import base64
 import logging
-from typing import Optional
+import random
+import requests
+from typing import Optional, Tuple
 from seleniumbase import SB
-from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
-class ProxyConfig:
-    """Manages proxy configuration and validation."""
+class GeolocationManager:
+    """Manages geolocation data retrieval and storage."""
     
     @staticmethod
-    def validate_proxy(proxy: str) -> bool:
+    def fetch_geo_data() -> dict:
         """
-        Validate proxy URL format.
+        Fetch geolocation data from IP API.
         
-        Args:
-            proxy: Proxy URL string
-            
         Returns:
-            True if valid, False otherwise
+            Dictionary containing lat, lon, timezone, and countryCode
         """
         try:
-            result = urlparse(proxy)
-            return all([result.scheme, result.netloc])
-        except Exception as e:
-            logger.error(f"Invalid proxy format: {proxy} - {e}")
-            return False
-
-
-class BrowserAutomation:
-    """Handles SeleniumBase browser automation with proxy support."""
+            logger.info("Fetching geolocation data...")
+            response = requests.get("http://ip-api.com/json/")
+            response.raise_for_status()
+            geo_data = response.json()
+            logger.info(f"Location: {geo_data.get('city')}, {geo_data.get('country')}")
+            return geo_data
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch geolocation: {e}")
+            raise
     
-    # Browser configuration constants
-    BROWSER_ARGS = {
+    @staticmethod
+    def extract_location(geo_data: dict) -> Tuple[float, float, str]:
+        """
+        Extract location coordinates and timezone.
+        
+        Args:
+            geo_data: Geolocation dictionary
+            
+        Returns:
+            Tuple of (latitude, longitude, timezone_id)
+        """
+        return (
+            geo_data["lat"],
+            geo_data["lon"],
+            geo_data["timezone"]
+        )
+
+
+class ChannelDecoder:
+    """Handles base64 decoding of channel names."""
+    
+    @staticmethod
+    def decode_channel(encoded_name: str) -> str:
+        """
+        Decode base64 encoded channel name.
+        
+        Args:
+            encoded_name: Base64 encoded channel name
+            
+        Returns:
+            Decoded channel name
+        """
+        try:
+            decoded = base64.b64decode(encoded_name).decode("utf-8")
+            logger.info(f"Decoded channel: {decoded}")
+            return decoded
+        except Exception as e:
+            logger.error(f"Failed to decode channel name: {e}")
+            raise
+    
+    @staticmethod
+    def build_url(channel_name: str, platform: str = "twitch") -> str:
+        """
+        Build platform URL from channel name.
+        
+        Args:
+            channel_name: Channel name
+            platform: "twitch" or "youtube"
+            
+        Returns:
+            Full URL
+        """
+        if platform == "twitch":
+            url = f"https://www.twitch.tv/{channel_name}"
+        elif platform == "youtube":
+            url = f"https://www.youtube.com/@{channel_name}/live"
+        else:
+            raise ValueError(f"Unknown platform: {platform}")
+        
+        logger.info(f"Target URL: {url}")
+        return url
+
+
+class StreamViewer:
+    """Handles browser automation for stream viewing."""
+    
+    BROWSER_CONFIG = {
         'uc': True,
         'locale': 'en',
         'ad_block': True,
         'chromium_arg': '--disable-webgl',
     }
     
-    def __init__(self, proxy: Optional[str] = None):
+    WATCH_TIME_RANGE = (450, 800)  # seconds
+    
+    def __init__(self, url: str, latitude: float, longitude: float, timezone: str):
         """
-        Initialize browser automation.
+        Initialize stream viewer.
         
         Args:
-            proxy: Optional proxy URL string
+            url: Stream URL
+            latitude: Viewer latitude
+            longitude: Viewer longitude
+            timezone: Viewer timezone
         """
-        self.proxy = proxy
-        self.validator = ProxyConfig()
+        self.url = url
+        self.latitude = latitude
+        self.longitude = longitude
+        self.timezone = timezone
     
     def run(self) -> None:
-        """Execute the main automation loop."""
-        if self.proxy and not self.validator.validate_proxy(self.proxy):
-            logger.warning(f"Skipping invalid proxy: {self.proxy}")
-            self.proxy = None
-        
+        """Execute the main viewing loop with multiple viewers."""
         while True:
             try:
-                self._execute_session()
+                with SB(**self.BROWSER_CONFIG, proxy=False) as driver:
+                    logger.info("Primary viewer session started")
+                    
+                    self._activate_and_setup(driver, self.url)
+                    
+                    # Check if stream is live
+                    if not driver.is_element_present("#live-channel-stream-information"):
+                        logger.warning("Stream not live, exiting")
+                        break
+                    
+                    logger.info("Stream is live, starting secondary viewers")
+                    
+                    # Accept any remaining prompts
+                    self._accept_prompt(driver)
+                    
+                    # Start secondary viewer
+                    self._start_secondary_viewer(driver)
+                    
+                    # Watch for random duration
+                    watch_time = random.randint(*self.WATCH_TIME_RANGE)
+                    logger.info(f"Watching for {watch_time}s")
+                    driver.sleep(watch_time)
             except KeyboardInterrupt:
                 logger.info("Automation interrupted by user")
                 break
             except Exception as e:
-                logger.error(f"Automation error: {e}", exc_info=True)
-                self._handle_error()
-    
-    def _execute_session(self) -> None:
-        """Execute a single browser session."""
-        browser_config = self.BROWSER_ARGS.copy()
-        if self.proxy:
-            browser_config['proxy'] = self.proxy
+                logger.error(f"Error in viewing session: {e}", exc_info=True)
+                break
         
-        with SB(**browser_config) as driver:
-            logger.info(f"Browser session started (proxy: {self.proxy or 'none'})")
-            # Your automation logic here
-            self._perform_automation(driver)
-            logger.info("Browser session completed")
-    
-    def _perform_automation(self, driver) -> None:
+    def _activate_and_setup(self, driver, url: str) -> None:
         """
-        Perform your automation tasks.
+        Activate CDP mode and handle initial prompts.
         
         Args:
-            driver: SeleniumBase driver instance
+            driver: SeleniumBase driver
+            url: Stream URL
         """
-        # Add your automation logic here
-        pass
+        logger.info("Activating CDP mode with geolocation...")
+        driver.activate_cdp_mode(
+            url,
+            tzone=self.timezone,
+            geoloc=(self.latitude, self.longitude)
+        )
+        driver.sleep(2)
+        
+        # Accept initial prompts
+        self._accept_prompt(driver)
+        driver.sleep(2)
+        
+        # Click "Start Watching" if present
+        if driver.is_element_present('button:contains("Start Watching")'):
+            logger.info("Clicking 'Start Watching'")
+            driver.cdp.click('button:contains("Start Watching")', timeout=4)
+            driver.sleep(10)
+        
+        # Accept any additional prompts
+        self._accept_prompt(driver)
+        driver.sleep(2)
     
-    def _handle_error(self) -> None:
-        """Handle errors during automation."""
-        logger.warning("Restarting automation...")
+    def _accept_prompt(self, driver) -> None:
+        """
+        Accept "Accept" button if present.
+        
+        Args:
+            driver: SeleniumBase driver
+        """
+        if driver.is_element_present('button:contains("Accept")'):
+            logger.info("Accepting prompt")
+            driver.cdp.click('button:contains("Accept")', timeout=4)
+    
+    def _start_secondary_viewer(self, driver) -> None:
+        """
+        Start a secondary viewer in a new driver.
+        
+        Args:
+            driver: Primary SeleniumBase driver
+        """
+        try:
+            logger.info("Starting secondary viewer")
+            secondary_driver = driver.get_new_driver(undetectable=True)
+            
+            self._activate_and_setup(secondary_driver, self.url)
+            
+            driver.sleep(10)
+            logger.info("Secondary viewer initialized")
+        except Exception as e:
+            logger.error(f"Error starting secondary viewer: {e}")
 
 
 def main() -> None:
-    """Entry point for the automation script."""
-    # Example proxy URL - replace with your actual proxy
-    proxy_url: Optional[str] = None  # Set to your proxy if needed
-    
-    automation = BrowserAutomation(proxy=proxy_url)
-    automation.run()
+    """Entry point for the stream viewer automation."""
+    try:
+        # Fetch geolocation
+        geo_data = GeolocationManager.fetch_geo_data()
+        latitude, longitude, timezone = GeolocationManager.extract_location(geo_data)
+        
+        # Decode channel and build URL
+        encoded_channel = "YnJ1dGFsbGVz"  # "brutallyes" in base64
+        decoder = ChannelDecoder()
+        channel_name = decoder.decode_channel(encoded_channel)
+        #channel_name = "topson"
+        url = decoder.build_url(channel_name, platform="twitch")
+        
+        # Start viewing
+        viewer = StreamViewer(url, latitude, longitude, timezone)
+        viewer.run()
+        
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        raise
 
 
 if __name__ == '__main__':
